@@ -1,0 +1,1391 @@
+openapi: 3.1.0
+info:
+  title: Whisper Backend API
+  version: 0.1.0
+  description: |
+    Бэкенд для Android-клиента (порт MacWhisper на Kotlin).
+
+    Возможности:
+    - транскрибация аудио (OpenAI-совместимый формат) через разных провайдеров:
+      OpenAI, OpenAI-совместимые (Qwen, vLLM, LocalAI, whisper.cpp server), Ollama и т.п.;
+    - суммаризация текста через LLM выбранного провайдера;
+    - хранение аудио и расшифровок в объектном хранилище (MinIO/S3) с синхронизацией между устройствами;
+    - регистрация, вход, управление сессиями.
+
+    Ошибки возвращаются в формате RFC 9457 (application/problem+json).
+servers:
+  - url: https://api.example.com/api/v1
+    description: Production
+  - url: http://localhost:8080/api/v1
+    description: Local
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+  - name: Account
+  - name: Providers
+    description: Настройки LLM/ASR-провайдеров пользователя (ключи, адреса локальных моделей)
+  - name: Transcription
+  - name: Summarization
+  - name: Recordings
+    description: Аудиозаписи и их расшифровки (хранятся в MinIO)
+  - name: Jobs
+    description: Асинхронные задачи (долгая транскрибация/суммаризация)
+  - name: System
+
+paths:
+  # ───────────────────────────── System ─────────────────────────────
+  /health:
+    get:
+      tags: [System]
+      summary: Проверка живости сервиса
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  version: { type: string, example: 0.1.0 }
+
+  # ───────────────────────────── Auth ─────────────────────────────
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Регистрация
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '201':
+          description: Пользователь создан, на почту отправлено письмо подтверждения
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthTokens' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409':
+          description: Email или username уже заняты
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Вход по email или username
+      description: |
+        Один эндпоинт: поле `login` принимает либо email, либо username
+        (сервер определяет по наличию `@`). Так делает большинство сервисов.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Успешный вход
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthTokens' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Обновление access-токена по refresh-токену (с ротацией)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: Новая пара токенов
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthTokens' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Выход (отзыв refresh-токена текущей сессии)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '204': { description: 'Выход выполнен' }
+
+  /auth/email/verify:
+    post:
+      tags: [Auth]
+      summary: Подтверждение email по токену из письма
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '204': { description: 'Email подтверждён' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /auth/email/resend:
+    post:
+      tags: [Auth]
+      summary: Повторно отправить письмо подтверждения
+      responses:
+        '204': { description: 'Письмо отправлено' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/password/forgot:
+    post:
+      tags: [Auth]
+      summary: Запрос на сброс пароля (письмо со ссылкой)
+      description: Всегда возвращает 204, чтобы не раскрывать наличие аккаунта.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '204': { description: 'Если аккаунт существует — письмо отправлено' }
+
+  /auth/password/reset:
+    post:
+      tags: [Auth]
+      summary: Установка нового пароля по токену из письма
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, newPassword]
+              properties:
+                token: { type: string }
+                newPassword: { type: string, minLength: 8, format: password }
+      responses:
+        '204': { description: 'Пароль изменён, все сессии отозваны' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  # ───────────────────────────── Account ─────────────────────────────
+  /me:
+    get:
+      tags: [Account]
+      summary: Текущий пользователь
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    patch:
+      tags: [Account]
+      summary: Изменить профиль / настройки по умолчанию
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+    delete:
+      tags: [Account]
+      summary: Удалить аккаунт и все данные (включая файлы в хранилище)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, format: password }
+      responses:
+        '204': { description: 'Аккаунт удалён' }
+
+  /me/password:
+    put:
+      tags: [Account]
+      summary: Сменить пароль
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string, format: password }
+                newPassword: { type: string, minLength: 8, format: password }
+      responses:
+        '204': { description: 'Пароль изменён' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /me/usage:
+    get:
+      tags: [Account]
+      summary: Использование квот (место в хранилище, минуты транскрибации)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Usage' }
+
+  /me/sessions:
+    get:
+      tags: [Account]
+      summary: Активные сессии (устройства)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Session' }
+
+  /me/sessions/{sessionId}:
+    delete:
+      tags: [Account]
+      summary: Завершить сессию на другом устройстве
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '204': { description: 'Сессия отозвана' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ───────────────────────────── Providers ─────────────────────────────
+  /providers:
+    get:
+      tags: [Providers]
+      summary: Список провайдеров пользователя
+      description: API-ключи никогда не возвращаются, только признак `hasApiKey`.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Provider' }
+    post:
+      tags: [Providers]
+      summary: Добавить провайдера (OpenAI, Anthropic, Ollama, OpenAI-совместимый и т.д.)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProviderCreate' }
+      responses:
+        '201':
+          description: Создан
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Provider' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /providers/{providerId}:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+    get:
+      tags: [Providers]
+      summary: Провайдер
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Provider' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Providers]
+      summary: Изменить провайдера
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProviderUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Provider' }
+    delete:
+      tags: [Providers]
+      summary: Удалить провайдера
+      responses:
+        '204': { description: 'Удалён' }
+
+  /providers/{providerId}/test:
+    post:
+      tags: [Providers]
+      summary: Проверить доступность провайдера и валидность ключа
+      parameters:
+        - $ref: '#/components/parameters/ProviderId'
+      responses:
+        '200':
+          description: Результат проверки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  latencyMs: { type: integer }
+                  message: { type: string }
+
+  /providers/{providerId}/models:
+    get:
+      tags: [Providers]
+      summary: Список моделей, доступных у провайдера
+      parameters:
+        - $ref: '#/components/parameters/ProviderId'
+        - name: capability
+          in: query
+          schema: { $ref: '#/components/schemas/Capability' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Model' }
+
+  # ───────────────────────────── Transcription ─────────────────────────────
+  /audio/transcriptions:
+    post:
+      tags: [Transcription]
+      summary: Транскрибация (OpenAI-совместимый формат, синхронно)
+      description: |
+        Совместим с `POST /v1/audio/transcriptions` OpenAI — клиент может использовать
+        готовые OpenAI-библиотеки. Дополнительные поля `provider_id` и `save`
+        являются расширениями.
+
+        Если `provider_id` не указан — используется провайдер по умолчанию из профиля.
+        Для длинных файлов используйте асинхронный `POST /recordings/{id}/transcribe`.
+      operationId: createTranscription
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/TranscriptionRequest' }
+            encoding:
+              timestamp_granularities[]:
+                style: form
+                explode: true
+      responses:
+        '200':
+          description: |
+            Результат. Тип зависит от `response_format`:
+            json / verbose_json → application/json; text / srt / vtt → text/plain.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/TranscriptionJson'
+                  - $ref: '#/components/schemas/TranscriptionVerbose'
+            text/plain:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '502': { $ref: '#/components/responses/UpstreamError' }
+
+  /audio/translations:
+    post:
+      tags: [Transcription]
+      summary: Перевод аудио в английский текст (OpenAI-совместимый формат)
+      description: Аналог `POST /v1/audio/translations` OpenAI — распознаёт речь и сразу переводит на английский.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                model: { type: string, example: whisper-1 }
+                provider_id: { type: string, format: uuid }
+                prompt: { type: string }
+                response_format: { $ref: '#/components/schemas/TranscriptionResponseFormat' }
+                temperature: { type: number, minimum: 0, maximum: 1 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TranscriptionJson' }
+            text/plain:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '502': { $ref: '#/components/responses/UpstreamError' }
+
+  # ───────────────────────────── Summarization ─────────────────────────────
+  /summaries:
+    post:
+      tags: [Summarization]
+      summary: Суммаризация текста или сохранённой расшифровки
+      description: |
+        Источник — либо `text`, либо `recordingId` (берётся текущая расшифровка).
+        При `stream: true` ответ идёт как Server-Sent Events (`text/event-stream`),
+        события `delta` с кусками текста и финальное `done`.
+        Если указан `recordingId` и `save: true` — результат сохраняется к записи.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SummaryRequest' }
+      responses:
+        '200':
+          description: Готовое резюме
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Summary' }
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  event: delta
+                  data: {"text":"..."}
+
+                  event: done
+                  data: {"summaryId":"...","usage":{...}}
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/UpstreamError' }
+
+  /summary-templates:
+    get:
+      tags: [Summarization]
+      summary: Шаблоны промптов для суммаризации (встроенные + пользовательские)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SummaryTemplate' }
+    post:
+      tags: [Summarization]
+      summary: Создать свой шаблон
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SummaryTemplateCreate' }
+      responses:
+        '201':
+          description: Создан
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SummaryTemplate' }
+
+  /summary-templates/{templateId}:
+    parameters:
+      - name: templateId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [Summarization]
+      summary: Изменить шаблон
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SummaryTemplateCreate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SummaryTemplate' }
+    delete:
+      tags: [Summarization]
+      summary: Удалить шаблон
+      responses:
+        '204': { description: 'Удалён' }
+
+  # ───────────────────────────── Recordings ─────────────────────────────
+  /recordings:
+    get:
+      tags: [Recordings]
+      summary: Список записей (с пагинацией и дельта-синхронизацией)
+      description: |
+        Для синхронизации между устройствами передавайте `updatedSince` —
+        вернутся созданные, изменённые и удалённые (`deleted: true`) записи.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: updatedSince
+          in: query
+          schema: { type: string, format: date-time }
+        - name: q
+          in: query
+          description: Полнотекстовый поиск по названию и расшифровке
+          schema: { type: string }
+        - name: tag
+          in: query
+          schema: { type: string }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [createdAt, -createdAt, updatedAt, -updatedAt, title]
+            default: -createdAt
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecordingPage' }
+    post:
+      tags: [Recordings]
+      summary: Загрузить аудио одним запросом (для небольших файлов)
+      description: |
+        Файл сохраняется в MinIO. Для больших файлов используйте
+        `POST /recordings/uploads` (presigned URL, загрузка напрямую в MinIO).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                title: { type: string }
+                language: { type: string, example: ru }
+                recordedAt: { type: string, format: date-time }
+                durationSec: { type: number }
+                tags:
+                  type: array
+                  items: { type: string }
+                transcript:
+                  description: Уже готовая расшифровка (если транскрибировали на устройстве)
+                  $ref: '#/components/schemas/TranscriptInput'
+                autoTranscribe:
+                  type: boolean
+                  default: false
+                  description: Сразу поставить задачу транскрибации на сервере
+      responses:
+        '201':
+          description: Запись создана
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Recording' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '507': { $ref: '#/components/responses/QuotaExceeded' }
+
+  /recordings/uploads:
+    post:
+      tags: [Recordings]
+      summary: Начать загрузку большого файла (presigned URL в MinIO)
+      description: |
+        1. Клиент вызывает этот метод и получает `uploadUrl` (или набор URL для multipart).
+        2. Загружает файл напрямую в MinIO (`PUT uploadUrl`).
+        3. Вызывает `POST /recordings/uploads/{uploadId}/complete`.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UploadInitRequest' }
+      responses:
+        '201':
+          description: Ссылки для загрузки выданы
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadInitResponse' }
+        '507': { $ref: '#/components/responses/QuotaExceeded' }
+
+  /recordings/uploads/{uploadId}/complete:
+    post:
+      tags: [Recordings]
+      summary: Завершить загрузку и создать запись
+      parameters:
+        - name: uploadId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                parts:
+                  description: Для multipart-загрузки — ETag каждой части
+                  type: array
+                  items:
+                    type: object
+                    required: [partNumber, etag]
+                    properties:
+                      partNumber: { type: integer }
+                      etag: { type: string }
+      responses:
+        '201':
+          description: Запись создана
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Recording' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /recordings/{recordingId}:
+    parameters:
+      - $ref: '#/components/parameters/RecordingId'
+    get:
+      tags: [Recordings]
+      summary: Метаданные записи
+      responses:
+        '200':
+          description: OK
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Recording' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Recordings]
+      summary: Изменить метаданные (название, теги, язык)
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecordingUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Recording' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+    delete:
+      tags: [Recordings]
+      summary: Удалить запись (мягкое удаление, файл чистится позже)
+      responses:
+        '204': { description: 'Удалено' }
+
+  /recordings/{recordingId}/audio:
+    get:
+      tags: [Recordings]
+      summary: Получить ссылку на скачивание аудио
+      description: Возвращает короткоживущий presigned URL MinIO (поддерживает Range для стриминга).
+      parameters:
+        - $ref: '#/components/parameters/RecordingId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DownloadLink' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /recordings/{recordingId}/transcript:
+    parameters:
+      - $ref: '#/components/parameters/RecordingId'
+    get:
+      tags: [Recordings]
+      summary: Получить расшифровку
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, text, srt, vtt]
+            default: json
+      responses:
+        '200':
+          description: OK
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transcript' }
+            text/plain:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Recordings]
+      summary: Сохранить/заменить расшифровку (например, после ручной правки)
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TranscriptInput' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transcript' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+
+  /recordings/{recordingId}/transcribe:
+    post:
+      tags: [Recordings]
+      summary: Асинхронная транскрибация уже загруженной записи
+      parameters:
+        - $ref: '#/components/parameters/RecordingId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                providerId: { type: string, format: uuid }
+                model: { type: string, example: whisper-1 }
+                language: { type: string, example: ru }
+                prompt: { type: string }
+                diarization:
+                  type: boolean
+                  default: false
+                  description: Разделение по спикерам (если поддерживает модель)
+      responses:
+        '202':
+          description: Задача поставлена
+          headers:
+            Location:
+              schema: { type: string, example: /api/v1/jobs/3fa85f64-5717-4562-b3fc-2c963f66afa6 }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+
+  /recordings/{recordingId}/summaries:
+    get:
+      tags: [Recordings]
+      summary: Сохранённые резюме записи
+      parameters:
+        - $ref: '#/components/parameters/RecordingId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Summary' }
+
+  /recordings/{recordingId}/share:
+    post:
+      tags: [Recordings]
+      summary: Создать публичную ссылку на запись (только чтение)
+      parameters:
+        - $ref: '#/components/parameters/RecordingId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expiresInHours: { type: integer, minimum: 1, maximum: 720 }
+                includeAudio: { type: boolean, default: true }
+      responses:
+        '201':
+          description: Ссылка создана
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareLink' }
+    delete:
+      tags: [Recordings]
+      summary: Отозвать публичную ссылку
+      parameters:
+        - $ref: '#/components/parameters/RecordingId'
+      responses:
+        '204': { description: 'Ссылка отозвана' }
+
+  # ───────────────────────────── Jobs ─────────────────────────────
+  /jobs/{jobId}:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+    get:
+      tags: [Jobs]
+      summary: Статус задачи
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Jobs]
+      summary: Отменить задачу
+      responses:
+        '204': { description: 'Отменена' }
+        '409':
+          description: Задача уже завершена
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /jobs/{jobId}/events:
+    get:
+      tags: [Jobs]
+      summary: Поток событий прогресса (SSE)
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: |
+            event: progress  data: {"progress":0.42}
+            event: completed data: {Job}
+            event: failed    data: {Job}
+          content:
+            text/event-stream:
+              schema: { type: string }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    RecordingId:
+      name: recordingId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ProviderId:
+      name: providerId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Cursor:
+      name: cursor
+      in: query
+      description: Непрозрачный курсор из `nextCursor` предыдущей страницы
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: UUID, сгенерированный клиентом. Повторный запрос с тем же ключом не создаст дубликат (важно при плохой мобильной сети).
+      schema: { type: string, format: uuid }
+    IfMatch:
+      name: If-Match
+      in: header
+      description: ETag версии, которую редактирует клиент. Защита от перезаписи правок с другого устройства.
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Некорректный запрос
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Не авторизован / неверные данные входа
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Не найдено
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PayloadTooLarge:
+      description: Файл слишком большой
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PreconditionFailed:
+      description: Версия изменилась на другом устройстве (конфликт)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    TooManyRequests:
+      description: Превышен лимит запросов
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    QuotaExceeded:
+      description: Закончилось место в хранилище
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    UpstreamError:
+      description: Ошибка на стороне провайдера модели (OpenAI/Ollama/...)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details
+      properties:
+        type: { type: string, format: uri, example: 'https://api.example.com/errors/validation' }
+        title: { type: string, example: Validation failed }
+        status: { type: integer, example: 400 }
+        detail: { type: string }
+        instance: { type: string }
+        code: { type: string, description: Машиночитаемый код ошибки, example: EMAIL_TAKEN }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field: { type: string }
+              message: { type: string }
+
+    # ── Auth / Account ──
+    RegisterRequest:
+      type: object
+      required: [email, username, password]
+      properties:
+        email: { type: string, format: email }
+        username: { type: string, minLength: 3, maxLength: 32, pattern: '^[a-zA-Z0-9_.-]+$' }
+        password: { type: string, minLength: 8, format: password }
+        deviceName: { type: string, example: Pixel 8 }
+
+    LoginRequest:
+      type: object
+      required: [login, password]
+      properties:
+        login: { type: string, description: Email или username, example: user@example.com }
+        password: { type: string, format: password }
+        deviceName: { type: string, example: Pixel 8 }
+
+    AuthTokens:
+      type: object
+      required: [accessToken, refreshToken, expiresIn, tokenType]
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        tokenType: { type: string, example: Bearer }
+        expiresIn: { type: integer, description: Время жизни access-токена в секундах, example: 900 }
+        user: { $ref: '#/components/schemas/User' }
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        emailVerified: { type: boolean }
+        username: { type: string }
+        displayName: { type: string }
+        defaults: { $ref: '#/components/schemas/UserDefaults' }
+        createdAt: { type: string, format: date-time }
+
+    UserDefaults:
+      type: object
+      description: Настройки по умолчанию, синхронизируемые между устройствами
+      properties:
+        transcriptionProviderId: { type: [string, 'null'], format: uuid }
+        transcriptionModel: { type: string }
+        summaryProviderId: { type: [string, 'null'], format: uuid }
+        summaryModel: { type: string }
+        language: { type: string, example: ru }
+        summaryTemplateId: { type: [string, 'null'], format: uuid }
+
+    UserUpdate:
+      type: object
+      properties:
+        displayName: { type: string }
+        username: { type: string }
+        defaults: { $ref: '#/components/schemas/UserDefaults' }
+
+    Usage:
+      type: object
+      properties:
+        storageUsedBytes: { type: integer, format: int64 }
+        storageLimitBytes: { type: integer, format: int64 }
+        transcriptionSecondsThisMonth: { type: integer }
+        transcriptionSecondsLimit: { type: [integer, 'null'] }
+        recordingsCount: { type: integer }
+
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        deviceName: { type: string }
+        userAgent: { type: string }
+        ip: { type: string }
+        createdAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        current: { type: boolean }
+
+    # ── Providers ──
+    ProviderType:
+      type: string
+      description: |
+        - openai — api.openai.com
+        - openai_compatible — любой сервер с OpenAI API (Qwen/DashScope, vLLM, LocalAI, whisper.cpp server, LM Studio)
+        - anthropic — Claude (только суммаризация)
+        - ollama — локальный Ollama (/api/chat)
+        - builtin — модель, развёрнутая на самом сервере (без ключа)
+      enum: [openai, openai_compatible, anthropic, ollama, builtin]
+
+    Capability:
+      type: string
+      enum: [transcription, chat]
+
+    ProviderCreate:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string, example: Мой Ollama }
+        type: { $ref: '#/components/schemas/ProviderType' }
+        baseUrl: { type: string, format: uri, example: 'http://192.168.1.10:11434' }
+        apiKey:
+          type: string
+          writeOnly: true
+          description: Хранится на сервере в зашифрованном виде, наружу не отдаётся. Не нужен для ollama/builtin.
+        extraHeaders:
+          type: object
+          additionalProperties: { type: string }
+        capabilities:
+          type: array
+          items: { $ref: '#/components/schemas/Capability' }
+
+    ProviderUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        baseUrl: { type: string, format: uri }
+        apiKey: { type: string, writeOnly: true, description: Передать пустую строку, чтобы удалить ключ }
+        extraHeaders:
+          type: object
+          additionalProperties: { type: string }
+        capabilities:
+          type: array
+          items: { $ref: '#/components/schemas/Capability' }
+
+    Provider:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        type: { $ref: '#/components/schemas/ProviderType' }
+        baseUrl: { type: string, format: uri }
+        hasApiKey: { type: boolean }
+        capabilities:
+          type: array
+          items: { $ref: '#/components/schemas/Capability' }
+        isSystem: { type: boolean, description: Провайдер, предоставленный сервером всем пользователям }
+        createdAt: { type: string, format: date-time }
+
+    Model:
+      type: object
+      properties:
+        id: { type: string, example: whisper-large-v3 }
+        name: { type: string }
+        capabilities:
+          type: array
+          items: { $ref: '#/components/schemas/Capability' }
+        contextWindow: { type: [integer, 'null'] }
+
+    # ── Transcription ──
+    TranscriptionResponseFormat:
+      type: string
+      enum: [json, text, srt, verbose_json, vtt]
+      default: json
+
+    TranscriptionRequest:
+      type: object
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+          description: flac, mp3, mp4, mpeg, mpga, m4a, ogg, opus, wav, webm
+        model: { type: string, example: whisper-1 }
+        language: { type: string, description: ISO-639-1, example: ru }
+        prompt: { type: string }
+        response_format: { $ref: '#/components/schemas/TranscriptionResponseFormat' }
+        temperature: { type: number, minimum: 0, maximum: 1, default: 0 }
+        timestamp_granularities[]:
+          type: array
+          items:
+            type: string
+            enum: [word, segment]
+        provider_id:
+          type: string
+          format: uuid
+          description: Расширение — какой провайдер использовать
+        save:
+          type: boolean
+          default: false
+          description: Расширение — сохранить аудио и расшифровку как запись (Recording)
+
+    TranscriptionJson:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string }
+        recording_id: { type: string, format: uuid, description: Если save=true }
+
+    TranscriptionVerbose:
+      type: object
+      properties:
+        task: { type: string, example: transcribe }
+        language: { type: string }
+        duration: { type: number }
+        text: { type: string }
+        segments:
+          type: array
+          items: { $ref: '#/components/schemas/Segment' }
+        words:
+          type: array
+          items:
+            type: object
+            properties:
+              word: { type: string }
+              start: { type: number }
+              end: { type: number }
+        recording_id: { type: string, format: uuid }
+
+    Segment:
+      type: object
+      properties:
+        id: { type: integer }
+        start: { type: number, description: секунды }
+        end: { type: number }
+        text: { type: string }
+        speaker: { type: [string, 'null'], example: SPEAKER_1 }
+
+    # ── Summarization ──
+    SummaryRequest:
+      type: object
+      properties:
+        text: { type: string, description: Текст для суммаризации (если нет recordingId) }
+        recordingId: { type: string, format: uuid }
+        providerId: { type: string, format: uuid }
+        model: { type: string, example: gpt-4o-mini }
+        templateId: { type: string, format: uuid }
+        prompt: { type: string, description: Свой промпт (перекрывает шаблон) }
+        language: { type: string, description: Язык резюме, example: ru }
+        maxTokens: { type: integer }
+        temperature: { type: number, minimum: 0, maximum: 2 }
+        stream: { type: boolean, default: false }
+        save: { type: boolean, default: true }
+      oneOf:
+        - required: [text]
+        - required: [recordingId]
+
+    Summary:
+      type: object
+      properties:
+        id: { type: [string, 'null'], format: uuid }
+        recordingId: { type: [string, 'null'], format: uuid }
+        text: { type: string }
+        providerId: { type: string, format: uuid }
+        model: { type: string }
+        templateId: { type: [string, 'null'], format: uuid }
+        usage:
+          type: object
+          properties:
+            inputTokens: { type: integer }
+            outputTokens: { type: integer }
+        createdAt: { type: string, format: date-time }
+
+    SummaryTemplateCreate:
+      type: object
+      required: [name, prompt]
+      properties:
+        name: { type: string, example: Протокол встречи }
+        prompt: { type: string, example: 'Выдели ключевые решения и задачи с ответственными: {{transcript}}' }
+
+    SummaryTemplate:
+      allOf:
+        - $ref: '#/components/schemas/SummaryTemplateCreate'
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            builtin: { type: boolean }
+
+    # ── Recordings ──
+    Recording:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        language: { type: string }
+        durationSec: { type: number }
+        sizeBytes: { type: integer, format: int64 }
+        mimeType: { type: string, example: audio/mp4 }
+        checksumSha256: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        status:
+          type: string
+          enum: [uploading, uploaded, transcribing, transcribed, failed]
+        hasTranscript: { type: boolean }
+        transcriptPreview: { type: string, description: Первые ~200 символов }
+        summariesCount: { type: integer }
+        version: { type: integer, description: Растёт при каждом изменении }
+        deleted: { type: boolean, description: true только в ответах с updatedSince }
+        recordedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    RecordingUpdate:
+      type: object
+      properties:
+        title: { type: string }
+        language: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+
+    RecordingPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Recording' }
+        nextCursor: { type: [string, 'null'] }
+        serverTime: { type: string, format: date-time, description: Использовать как следующий updatedSince }
+
+    UploadInitRequest:
+      type: object
+      required: [fileName, sizeBytes, mimeType]
+      properties:
+        fileName: { type: string }
+        sizeBytes: { type: integer, format: int64 }
+        mimeType: { type: string }
+        checksumSha256: { type: string }
+        title: { type: string }
+        language: { type: string }
+        recordedAt: { type: string, format: date-time }
+        durationSec: { type: number }
+        tags:
+          type: array
+          items: { type: string }
+
+    UploadInitResponse:
+      type: object
+      properties:
+        uploadId: { type: string, format: uuid }
+        method: { type: string, enum: [single, multipart] }
+        uploadUrl: { type: string, format: uri, description: Для single — PUT сюда }
+        partSize: { type: integer, description: Для multipart }
+        parts:
+          type: array
+          items:
+            type: object
+            properties:
+              partNumber: { type: integer }
+              url: { type: string, format: uri }
+        expiresAt: { type: string, format: date-time }
+
+    DownloadLink:
+      type: object
+      properties:
+        url: { type: string, format: uri }
+        expiresAt: { type: string, format: date-time }
+        mimeType: { type: string }
+        sizeBytes: { type: integer, format: int64 }
+
+    TranscriptInput:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string }
+        language: { type: string }
+        segments:
+          type: array
+          items: { $ref: '#/components/schemas/Segment' }
+        source:
+          type: string
+          enum: [device, server, manual]
+          description: Где получена расшифровка
+        model: { type: string }
+
+    Transcript:
+      allOf:
+        - $ref: '#/components/schemas/TranscriptInput'
+        - type: object
+          properties:
+            recordingId: { type: string, format: uuid }
+            version: { type: integer }
+            updatedAt: { type: string, format: date-time }
+
+    ShareLink:
+      type: object
+      properties:
+        url: { type: string, format: uri }
+        expiresAt: { type: [string, 'null'], format: date-time }
+
+    # ── Jobs ──
+    Job:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [transcription, summary] }
+        status: { type: string, enum: [queued, running, completed, failed, cancelled] }
+        progress: { type: number, minimum: 0, maximum: 1 }
+        recordingId: { type: string, format: uuid }
+        error: { $ref: '#/components/schemas/Problem' }
+        createdAt: { type: string, format: date-time }
+        finishedAt: { type: [string, 'null'], format: date-time }

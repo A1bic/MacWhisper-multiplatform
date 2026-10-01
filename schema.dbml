@@ -1,0 +1,132 @@
+Project whisper_backend {
+  database_type: 'PostgreSQL'
+  Note: 'Пользователи, аудио в MinIO, расшифровки, суммаризации'
+}
+
+Enum job_status {
+  queued
+  processing
+  done
+  failed
+}
+
+Enum summary_kind {
+  short
+  detailed
+  action_items
+  custom
+}
+
+TableGroup auth [color: #3B82F6] {
+  users
+  refresh_tokens
+}
+
+TableGroup media [color: #10B981] {
+  recordings
+}
+
+TableGroup processing [color: #F59E0B] {
+  transcriptions
+  transcript_segments
+  summaries
+}
+
+Table users {
+  id uuid [pk, default: `gen_random_uuid()`]
+  email citext [not null, unique]
+  password_hash text [not null, note: 'argon2 / bcrypt']
+  display_name text
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  Note: 'Аккаунты пользователей'
+}
+
+Table refresh_tokens {
+  id uuid [pk, default: `gen_random_uuid()`]
+  user_id uuid [not null, ref: > users.id]
+  token_hash text [not null, unique, note: 'Хэш, не сам токен']
+  device_info text
+  expires_at timestamptz [not null]
+  revoked_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  Note: 'Сессии / refresh-токены для входа'
+}
+
+Table recordings {
+  id uuid [pk, default: `gen_random_uuid()`]
+  user_id uuid [not null, ref: > users.id]
+  title text [not null]
+  original_filename text
+  mime_type text [not null]
+  size_bytes bigint [not null]
+  duration_ms bigint
+  storage_bucket text [not null, note: 'MinIO bucket']
+  storage_key text [not null, note: 'MinIO object key']
+  checksum_sha256 text
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  deleted_at timestamptz [note: 'Soft delete']
+
+  indexes {
+    (storage_bucket, storage_key) [unique]
+    (user_id, created_at)
+  }
+  Note: 'Метаданные аудио; сам файл лежит в MinIO'
+}
+
+Table transcriptions {
+  id uuid [pk, default: `gen_random_uuid()`]
+  recording_id uuid [not null, ref: > recordings.id]
+  status job_status [not null, default: 'queued']
+  model text [not null, note: 'напр. whisper-large-v3']
+  language text [note: 'ISO 639-1, NULL = автоопределение']
+  full_text text [note: 'Заполняется при done']
+  result_key text [note: 'JSON/SRT/VTT в MinIO']
+  error_message text
+  attempts int [not null, default: 0]
+  created_at timestamptz [not null, default: `now()`]
+  started_at timestamptz
+  finished_at timestamptz
+  search_tsv tsvector [note: 'Генерируется из full_text, GIN-индекс']
+
+  indexes {
+    (recording_id, created_at)
+    search_tsv [type: gin]
+  }
+  Note: 'Задача и результат расшифровки; у записи может быть несколько'
+}
+
+Table transcript_segments {
+  id bigint [pk, increment]
+  transcription_id uuid [not null, ref: > transcriptions.id]
+  seq int [not null]
+  start_ms bigint [not null]
+  end_ms bigint [not null]
+  text text [not null]
+  speaker text [note: 'Диаризация']
+  confidence real
+
+  indexes {
+    (transcription_id, seq) [unique]
+  }
+  Note: 'Фрагменты с таймкодами для плеера и экспорта'
+}
+
+Table summaries {
+  id uuid [pk, default: `gen_random_uuid()`]
+  transcription_id uuid [not null, ref: > transcriptions.id]
+  kind summary_kind [not null, default: 'short']
+  status job_status [not null, default: 'queued']
+  model text [not null]
+  prompt text [note: 'Обязателен для custom']
+  content text
+  error_message text
+  created_at timestamptz [not null, default: `now()`]
+  finished_at timestamptz
+
+  indexes {
+    (transcription_id, created_at)
+  }
+  Note: 'Суммаризации расшифровки разных типов'
+}
