@@ -1,0 +1,26 @@
+ktor:
+  deployment:
+    port: 8080
+  application:
+    modules:
+
+jwt:
+  secret: "secret"
+  issuer: "macwhisper-backend"
+  audience: "whisper-android"
+  realm: "whisper-api"
+  accessTtlMinutes: 15
+  refreshTtlDays: 30
+
+db:
+  user: "$DB_USER:postgres"
+  password: "$DB_PASSWORD:postgres"
+  url: "$DB_URL:jdbc:postgresql://localhost:5433/mac_whisper"
+
+minio:
+  endpoint: "http://localhost:9000"
+  accessKey: "minioadmin"
+  secretKey: "minioadmin"
+  buckets:
+    recordings: "recordings"
+    transcriptions: "transcriptions"
