@@ -1,0 +1,1 @@
+CREATE INDEX idx_recordings_user_id ON recordings (user_id);

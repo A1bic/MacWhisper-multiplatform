@@ -1,0 +1,1 @@
+CREATE INDEX idx_summaries_transcription_id ON summaries (transcription_id);
