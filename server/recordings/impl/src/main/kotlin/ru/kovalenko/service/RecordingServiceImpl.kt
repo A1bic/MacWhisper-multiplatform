@@ -10,7 +10,7 @@ import ru.kovalenko.operations.DeleteRecording
 import ru.kovalenko.operations.DownloadRecording
 import ru.kovalenko.operations.GetAllRecordings
 import ru.kovalenko.operations.RenameRecording
-import ru.kovalenko.repository.mappers.toDto
+import ru.kovalenko.repository.entity.toDto
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.minutes
 import kotlin.uuid.Uuid
@@ -18,7 +18,7 @@ import kotlin.uuid.Uuid
 class RecordingServiceImpl(private val recordingStorage: FileStorage,
                            private val recordingRepository: RecordingRepository) : RecordingService {
 
-    override suspend fun save(request: AddRecording.Request): AddRecording.Response {
+    override fun save(request: AddRecording.Request): AddRecording.Response {
         val recordingId = RecordingId(Uuid.random())
         val key = "users/${request.userId.value}/recordings/${recordingId.value}"
 

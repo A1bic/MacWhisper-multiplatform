@@ -7,7 +7,7 @@ import ru.kovalenko.repository.entity.NewRecording
 import ru.kovalenko.db.RecordingRepository
 import ru.kovalenko.repository.entity.RecordingEntity
 import ru.kovalenko.recordings.jooq.tables.references.RECORDINGS
-import ru.kovalenko.repository.mappers.toEntity
+import ru.kovalenko.repository.entity.toEntity
 import kotlin.uuid.toJavaUuid
 
 class RecordingRepositoryImpl(private val dsl: DSLContext) : RecordingRepository {

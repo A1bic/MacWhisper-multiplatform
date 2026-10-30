@@ -9,17 +9,18 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.Headers
 import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
+import kotlinx.coroutines.runBlocking
 import ru.kovalenko.dto.EngineDto
 import ru.kovalenko.whisper.models.WhisperResponse
 
 class WhisperClient(private val http: HttpClient) {
-    suspend fun transcribe(
+    fun transcribe(
         engine: EngineDto,
         audio: ByteArray,
         fileName: String,
         mimeType: String,
         language: String?
-    ) : WhisperResponse {
+    ) : WhisperResponse = runBlocking {
         val response = http.submitFormWithBinaryData(
             url = engine.baseUrl.trimEnd('/') + "/audio/transcriptions",
             formData = formData {
@@ -38,6 +39,6 @@ class WhisperClient(private val http: HttpClient) {
         if (!response.status.isSuccess()) {
             error("Transcribe service responded ${response.status.value}: ${response.bodyAsText().take(500)} ")
         }
-        return response.body()
+        response.body<WhisperResponse>()
     }
 }

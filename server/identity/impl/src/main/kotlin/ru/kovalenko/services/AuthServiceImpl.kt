@@ -12,7 +12,7 @@ import ru.kovalenko.repository.UserRepository
 import ru.kovalenko.repository.entity.NewRefreshToken
 import ru.kovalenko.repository.entity.NewUser
 import ru.kovalenko.repository.entity.UserEntity
-import ru.kovalenko.repository.mappers.toDto
+import ru.kovalenko.repository.entity.toDto
 import kotlin.time.Clock
 
 class AuthServiceImpl(

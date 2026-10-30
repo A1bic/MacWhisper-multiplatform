@@ -15,6 +15,8 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import io.ktor.utils.io.jvm.javaio.toInputStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import ru.kovalenko.operations.AddRecording
 import ru.kovalenko.operations.DownloadRecording
 import ru.kovalenko.service.RecordingService
@@ -39,7 +41,7 @@ fun Application.configureRecordingRouting(recordingService: RecordingService) {
                                         "title" -> title = part.value
                                     }
                                 is PartData.FileItem -> {
-                                    response = recordingService.save(
+                                    response = withContext(Dispatchers.IO) { recordingService.save(
                                         AddRecording.Request(
                                             userId = call.userId(),
                                             title = title ?: part.originalFileName ?: "Без названия",
@@ -47,7 +49,7 @@ fun Application.configureRecordingRouting(recordingService: RecordingService) {
                                             mimeType = part.contentType?.toString() ?: "application/octet-stream",
                                             content = part.provider().toInputStream()
                                         )
-                                    )
+                                    ) }
                                 }
                                 else -> {}
                             }

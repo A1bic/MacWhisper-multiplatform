@@ -1,5 +1,6 @@
 plugins {
     id("kotlin-conventions")
+    application
 }
 
 dependencies {
@@ -31,4 +32,23 @@ dependencies {
     implementation(libs.flyway.database.postgres)
     implementation(libs.jooq)
     implementation(libs.jooq.kotlin)
+}
+
+application {
+    mainClass = "ru.kovalenko.MacWhisperApplicationKt"
+}
+
+val runtimeClasspath = configurations.runtimeClasspath.get().incoming
+val externalLibs = runtimeClasspath.artifactView { componentFilter { it !is ProjectComponentIdentifier } }.files
+val projectLibs = runtimeClasspath.artifactView { componentFilter { it is ProjectComponentIdentifier } }.files
+
+tasks.register<Sync>("dockerLayout") {
+    group = "distribution"
+    description = "Собирает build/docker/{libs,app} для Docker-образа"
+    into(layout.buildDirectory.dir("docker"))
+    into("libs") { from(externalLibs) }
+    into("app") {
+        from(projectLibs)
+        from(tasks.jar)
+    }
 }

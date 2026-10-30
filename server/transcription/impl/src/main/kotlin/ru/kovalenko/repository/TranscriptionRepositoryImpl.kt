@@ -2,11 +2,12 @@ package ru.kovalenko.repository
 
 import org.jooq.DSLContext
 import org.jooq.impl.DSL
+import ru.kovalenko.RecordingId
 import ru.kovalenko.TranscriptionId
 import ru.kovalenko.repository.entity.NewSegment
 import ru.kovalenko.repository.entity.NewTranscription
 import ru.kovalenko.repository.entity.TranscriptionEntity
-import ru.kovalenko.repository.mappers.toEntity
+import ru.kovalenko.repository.entity.toEntity
 import ru.kovalenko.transcription.jooq.enums.JobStatus
 import ru.kovalenko.transcription.jooq.tables.references.TRANSCRIPTIONS
 import ru.kovalenko.transcription.jooq.tables.references.TRANSCRIPT_SEGMENTS
@@ -77,7 +78,6 @@ class TranscriptionRepositoryImpl(private val dsl: DSLContext): TranscriptionRep
         }
     }
 
-    // При старте сервера: ключей от этих задач в памяти уже нет, довести их не получится
     override fun failInterrupted() {
         dsl.update(TRANSCRIPTIONS)
             .set(TRANSCRIPTIONS.STATUS, JobStatus.failed)
@@ -86,4 +86,11 @@ class TranscriptionRepositoryImpl(private val dsl: DSLContext): TranscriptionRep
             .where(TRANSCRIPTIONS.STATUS.`in`(JobStatus.queued, JobStatus.processing))
             .execute()
     }
+
+    override fun findByRecordingId(recordingId: RecordingId): List<TranscriptionEntity> =
+        dsl.selectFrom(TRANSCRIPTIONS)
+            .where(TRANSCRIPTIONS.RECORDING_ID.eq(recordingId.value.toJavaUuid()))
+            .orderBy(TRANSCRIPTIONS.CREATED_AT.desc())
+            .fetch()
+            .map { it.toEntity() }
 }

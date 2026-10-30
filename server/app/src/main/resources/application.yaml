@@ -5,7 +5,7 @@ ktor:
     modules:
 
 jwt:
-  secret: "secret"
+  secret: "$JWT_SECRET:secret"
   issuer: "macwhisper-backend"
   audience: "whisper-android"
   realm: "whisper-api"
@@ -18,9 +18,9 @@ db:
   url: "$DB_URL:jdbc:postgresql://localhost:5433/mac_whisper"
 
 minio:
-  endpoint: "http://localhost:9000"
-  accessKey: "minioadmin"
-  secretKey: "minioadmin"
+  endpoint: "$MINIO_ENDPOINT:http://localhost:9000"
+  accessKey: "$MINIO_ACCESS_KEY:minioadmin"
+  secretKey: "$MINIO_SECRET_KEY:minioadmin"
   buckets:
     recordings: "recordings"
     transcriptions: "transcriptions"

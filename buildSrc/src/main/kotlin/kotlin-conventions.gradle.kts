@@ -6,6 +6,8 @@ plugins {
 
 group = "ru.kovalenko" + project.path.substringBeforeLast(':').replace(':', '.')
 
+base.archivesName = project.path.removePrefix(":").replace(':', '-')
+
 repositories {
     mavenCentral()
 }
@@ -18,7 +20,10 @@ val libs = the<VersionCatalogsExtension>().named("libs")
 
 dependencies {
     implementation(libs.findLibrary("kotlinx-serialization-json").get())
-    testImplementation(kotlin("test"))
+    testImplementation(platform(libs.findLibrary("junit-bom").get()))
+    testImplementation(libs.findLibrary("junit-jupiter").get())
+    testImplementation(libs.findLibrary("assertj").get())
+    testRuntimeOnly(libs.findLibrary("junit-platform-launcher").get())
 }
 
 tasks.test {

@@ -6,13 +6,12 @@ import ru.kovalenko.UserId
 import ru.kovalenko.identity.jooq.tables.references.USERS
 import ru.kovalenko.repository.entity.NewUser
 import ru.kovalenko.repository.entity.UserEntity
-import ru.kovalenko.repository.mappers.toEntity
+import ru.kovalenko.repository.entity.toEntity
 import kotlin.uuid.toJavaUuid
 
 class UserRepositoryImpl(private val dsl: DSLContext) : UserRepository {
     override fun save(user: NewUser): UserEntity =
         dsl.insertInto(USERS)
-//            .set(USERS.ID, user.id.value.toJavaUuid())
             .set(USERS.EMAIL, user.email)
             .set(USERS.PASSWORD_HASH, user.password)
             .set(USERS.DISPLAY_NAME, user.displayName)

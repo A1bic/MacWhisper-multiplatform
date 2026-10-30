@@ -37,7 +37,7 @@ class TranscriptionWorker(
         }
     }
 
-    private suspend fun process(job: TranscriptionJob) {
+    private fun process(job: TranscriptionJob) {
         try {
             repository.markProcessing(job.transcriptionId)
 
@@ -48,7 +48,6 @@ class TranscriptionWorker(
             val result = whisperClient.transcribe(
                 engine = job.engine,
                 audio = bytes,
-                // Сервисы определяют формат по расширению файла
                 fileName = recording.originalFileName ?: "audio.m4a",
                 mimeType = recording.mimeType,
                 language = job.language,
@@ -59,14 +58,14 @@ class TranscriptionWorker(
                 fullText = result.text.trim(),
                 segments = result.segments.map {
                     NewSegment(
-                        startMs = (it.start * 1000).roundToLong(),   // секунды → миллисекунды
+                        startMs = (it.start * 1000).roundToLong(),
                         endMs = (it.end * 1000).roundToLong(),
                         text = it.text.trim(),
                     )
                 },
             )
         } catch (e: CancellationException) {
-            throw e   // сервер останавливается — не помечаем задачу как упавшую, просто выходим
+            throw e
         } catch (e: Exception) {
             repository.markFailed(job.transcriptionId, e.message ?: e::class.simpleName ?: "Неизвестная ошибка")
         }

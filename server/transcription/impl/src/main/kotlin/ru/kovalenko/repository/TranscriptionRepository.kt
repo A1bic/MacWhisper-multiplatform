@@ -1,5 +1,6 @@
 package ru.kovalenko.repository
 
+import ru.kovalenko.RecordingId
 import ru.kovalenko.TranscriptionId
 import ru.kovalenko.repository.entity.NewSegment
 import ru.kovalenko.repository.entity.NewTranscription
@@ -12,4 +13,5 @@ interface TranscriptionRepository {
     fun markDone(id: TranscriptionId, fullText: String, segments: List<NewSegment>)
     fun markFailed(id: TranscriptionId, message: String)
     fun failInterrupted()
+    fun findByRecordingId(recordingId: RecordingId) : List<TranscriptionEntity>
 }
