@@ -37,8 +37,8 @@
 ### Запуск
 
 ```bash
-git clone https://github.com/<user>/<repo>.git
-cd <repo>
+git clone https://github.com/A1bic/MacWhisper-multiplatform.git
+cd MacWhisper-multiplatform
 cp .env.example .env        # заполни переменные
 docker compose up -d        # поднимет PostgreSQL и MinIO
 ./gradlew run
