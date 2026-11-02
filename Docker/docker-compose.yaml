@@ -1,0 +1,55 @@
+services:
+  server:
+    build:
+      context: ..
+    image: macwhisper-server
+    container_name: mac_whisper_server
+    ports:
+      - "8080:8080"
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/mac_whisper
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      JWT_SECRET: ${JWT_SECRET:-secret}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:latest
+    container_name: mac_whisper_postgres
+    environment:
+      POSTGRES_DB: mac_whisper
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d mac_whisper" ]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: pgsty/silo:latest
+    command: server /data --console-address ":9001"
+    ports: [ "9000:9000", "9001:9001" ]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes: [ minio-data:/data ]
+
+
+volumes:
+  minio-data:
+  postgres_data:
